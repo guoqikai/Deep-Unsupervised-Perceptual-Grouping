@@ -8,11 +8,6 @@ def corr_input_gauss(inputs, std):
     return inputs + tf.random_normal(tf.shape(inputs)) * std
 
 
-# the paper suggest we better add bitflip noise when dealing with binary input
-def corr_input_bitflip(inputs, std):
-    pass
-
-
 def init_weight(shape, name, seed):
     return tf.Variable(tf.random_normal(shape, name=name, seed=seed) / math.sqrt(shape[0]))
 
@@ -24,7 +19,7 @@ def init_bias(inits, size, name):
 def batch_normalization(batch, mean=None, var=None):
     if mean is None or var is None:
         mean, var = tf.nn.moments(batch, axes=[0])
-    return (batch - mean) / tf.sqrt(var + tf.constant(1e-10))
+    return (batch - mean) / tf.sqrt(var + 1e-10)
 
 
 def g_gauss_stable_v(z_c, u, size):
@@ -50,12 +45,47 @@ def g_gauss_stable_v(z_c, u, size):
     return z_est
 
 
-def compute_m_lh(x, z, v):
-    return
+def compute_m_lh(x, z, v, noise_std):
+    noise_factor = noise_std ** 2 + v ** 2
+    # Represents negative log-p
+    loss = 0.5 * tf.log(noise_factor) + tf.sqrt(z - x) / (2. * noise_factor)
+    loss -= tf.reduce_min(loss, axis=0, keepdims=True)
+    normalizer = tf.log(tf.reduce_sum(tf.exp(-loss), axis=0, keepdims=True))
+    loss += normalizer
+    return tf.exp(-loss)
 
 
 def compute_z_gradient(x, z, m):
-    return
+    return m * (x - z)
+
+
+def compute_classification_cost(predict, target):
+    return 0
+
+
+def compute_denoising_cost(z_hat, m_hat, x, v):
+    """for continuous case Ci = -log(sum(q(x|gk) = N(x; zk, vI))"""
+
+    input_shape = tf.reshape(x)
+    flat_shape = (input_shape[0], input_shape[1], input_shape[2], -1)
+    z_hat = tf.reshape(z_hat, flat_shape)
+    m_hat = tf.reshape(m_hat, flat_shape)
+    x = tf.reshape(x, flat_shape)
+    v = tf.reshape(v, flat_shape)
+
+    sqr_err = (x - z_hat) ** 2
+    sqr_err /= v
+
+    log_ps = .5 * (tf.log(v) + sqr_err)
+    log_ps += tf.log (m_hat + 1e-5)
+
+    log_max = tf.reduce_max(log_ps, axis=0, keepdims=True)
+    ps = tf.exp(log_ps - log_max)
+
+    p = tf.reduce_sum(ps, axis=0, keepdims=True)
+    err = -tf.log(p) - log_max
+
+    return tf.reduce_mean(err)
 
 
 def g_gauss(z_c, u, size):
@@ -96,19 +126,19 @@ class Tagger:
         self.ladder_layer_sizes = kwargs.get("ladder_layer_sizes")
         self.init_z_val = kwargs.get("init_z_val")
 
-        self.noise_sid = kwargs.get ("noise_sid", 0.3)
+        self.noise_sid = kwargs.get("noise_sid", 0.3)
+        self.class_cost = kwargs.get("class_cost", 0.1)
         self.seed = kwargs.get("seed", 42)
         self.num_epochs = kwargs.get("num_epochs", 100)
         self.batch_size = kwargs.get("batch_size", 100)
 
         self.inputs_labeled = tf.placeholder(tf.float32, shape=(None, None))
-        self.targets_labeled = tf.placeholder(tf.float32, shape=(None, None, None))
+        self.targets_labeled = tf.placeholder(tf.float32, shape=(None, None))
         self.inputs_unlabeled = tf.placeholder(tf.float32, shape=(None, None))
 
         self.ladder = _TagLadder(self.ladder_layer_sizes, self.seed)
 
         self._build()
-
 
     def _build(self, calculate_ami=False):
         """this method should be called after all fields are inited"""
@@ -121,17 +151,17 @@ class Tagger:
             clean_out["u"] = self._build_one_path(self.inputs_unlabeled, None, None)
 
         corr_out["l"] = self._build_one_path(self.inputs_labeled, self.targets_labeled, None)
-        corr_out["u"] = self._build_one_path (self.inputs_unlabeled, None, lambda x : g_gauss_stable_v(x, self.noise_sid))
+        corr_out["u"] = self._build_one_path (self.inputs_unlabeled, None, lambda x : corr_input_gauss(x, self.noise_sid))
 
-
+        self.cost = tf.reduce_mean(corr_out["u"]["cost"]) + corr_out["l"]["cost"][-1] * self.class_cost
+        self.m = corr_out["u"]["m"]
+        self.z = corr_out["u"]["z"]
 
     def _build_one_path(self, inputs, labeled_target, noise_func):
-        batch_size = tf.shape(inputs)[0]
         input_entries = tf.reduce_prod(tf.shape(inputs)[1:], name="layer_to_first")
 
         # dim: group, batch, input..
         corr_inputs = tf.keras.backend.repeat_elements(tf.expand_dims(inputs, 0), rep=self.iterations, axis=0)
-
 
         if noise_func:
             corr_inputs = noise_func(inputs)
@@ -139,7 +169,7 @@ class Tagger:
         v_est = tf.Variable(tf.ones[[tf.shape(corr_inputs)]], name="estimated variance of inputs")
         v_est_pos = tf.keras.backend.switch(tf.less(v_est, 0), 1/tf.sqrt(v_est ** 2 + 1), v_est + tf.sqrt(v_est ** 2 + 1))
 
-        attr = {}
+        attr = {"cost": [], "pred": [], "m": [], "z": []}
 
         m, z, m_hat, z_hat = (None,) * 4
         for step in range(self.iterations):
@@ -155,36 +185,53 @@ class Tagger:
             m_lh = compute_m_lh(corr_inputs, z, v_est_pos)
             z_delta = compute_z_gradient(corr_inputs, z, m)
 
-            input = tf.concat([z, z_delta, m, m_lh], axis=2)
+            inputs = tf.concat([z, z_delta, m, m_lh], axis=2)
 
-            #project the input to ladder net
-            self.proj_weight_to_ladder = tf.Variable((input_entries * 4, self.ladder_layer_sizes[0]), name="input project")
-            self.proj_bias_to_ladder = tf.Variable((input_entries * 4, self.ladder_layer_sizes[0]), name="input project")
+            # project the input to ladder net
+            proj_weight_to_ladder = \
+                init_weight((input_entries * 4, self.ladder_layer_sizes[0]), "input project weight", self.seed)
+            proj_bias_to_ladder = \
+                init_bias(1., "input project bias", (input_entries * 4, self.ladder_layer_sizes[0]))
 
+            # create one hidden layer
+            h = tf.nn.relu(batch_normalization(tf.matmul(inputs, proj_weight_to_ladder)) + proj_bias_to_ladder)
 
+            # flatten group
+            h_shape = tf.shape(h)
+            h = tf.reshape(h, [-1, h_shape[2], h_shape[3]])
 
+            # pass to ladder
+            top, encoder_attr = self.ladder.encoder_path(h)
 
+            # get z_est of the lowest layer
+            z_est = self.ladder.decoder_path(encoder_attr, top)[0]
 
+            proj_weight_z_hat = \
+                init_weight((self.ladder_layer_sizes[0], input_entries), "z_hat project weight", self.seed)
+            proj_bias_z_hat = \
+                init_bias(1., "z_hat project bias", (self.ladder_layer_sizes[0], input_entries))
 
+            z_hat = tf.reshape(tf.Variable(tf.ones(input_entries), name="c1") *
+                               (batch_normalization(tf.matmul(z_est, proj_weight_z_hat)) + proj_bias_z_hat), h_shape)
 
+            proj_weight_m_hat = \
+                init_weight((self.ladder_layer_sizes[0], input_entries), "m_hat project weight", self.seed)
 
+            m_hat = tf.reshape(tf.nn.softmax(tf.Variable(1.0, name="c2") *
+                                             batch_normalization(tf.matmul(z_est, proj_weight_m_hat)), axis=0), h_shape)
 
+            pred = top / tf.reduce_sum(tf.reduce_sum(m_hat, axis=2, keepdims=True), axis=0, keepdims=True)
 
+            if labeled_target:
+                attr["cost"].append(compute_classification_cost(pred, labeled_target))
+            else:
+                attr["cost"].append(compute_denoising_cost(z_hat, m_hat, inputs, v_est))
 
+            attr["pred"].append(pred)
+            attr["m"].append(m_hat)
+            attr["z"].append(z_hat)
 
-
-
-
-
-
-
-
-    def _compute_denoising_cost(self, z_hat, m_hat, x, v):
-        """for continuous case Ci = -log(sum(q(x|gk) = N(x; zk, vI))"""
-
-
-
-
+        return attr
 
 
 
@@ -201,9 +248,9 @@ class _TagLadder:
         self.layer_sizes = layer_sizes
         self.num_layers = num_layers = len(layer_sizes) - 1
 
-        self.ewma = tf.train.ExponentialMovingAverage (decay=0.99)  # to calculate the moving averages of mean and variance
-        self.running_mean = [tf.Variable (tf.constant (0.0, shape=[l]), trainable=False) for l in layer_sizes[1:]]
-        self.running_var = [tf.Variable (tf.constant (1.0, shape=[l]), trainable=False) for l in layer_sizes[1:]]
+        self.ewma = tf.train.ExponentialMovingAverage(decay=0.99)  # to calculate the moving averages of mean and variance
+        self.running_mean = [tf.Variable (tf.constant(0.0, shape=[l]), trainable=False) for l in layer_sizes[1:]]
+        self.running_var = [tf.Variable (tf.constant(1.0, shape=[l]), trainable=False) for l in layer_sizes[1:]]
 
         self.weights = \
             {'W': [init_weight(s, "W", seed) for s in zip (layer_sizes[:-1], layer_sizes[1:])],
@@ -213,16 +260,16 @@ class _TagLadder:
 
         self.training = tf.placeholder(tf.bool)
 
-    def encoder_path(self, inputs, noise_std, layer_sizes):
-        h = inputs + tf.random_normal (tf.shape (inputs)) * noise_std  # add noise to input
+    def encoder_path(self, inputs):
+        h = inputs
 
         # to store the pre-activation, activation, mean and variance for each layer
         d = {'z': {0: h}, 'm': {}, 'v': {}, 'h': {}}
 
         for l in range(1, self.num_layers + 1):
-            print ("Layer ", l, ": ", layer_sizes[l - 1], " -> ", layer_sizes[l])
+            print ("Layer ", l, ": ", self.layer_sizes[l - 1], " -> ", self.layer_sizes[l])
             d['h'][l - 1] = h
-            z_pre = tf.matmul (h, self.weights['W'][l - 1])  # pre-activation
+            z_pre = tf.matmul(h, self.weights['W'][l - 1])  # pre-activation
             m, v = tf.nn.moments(z_pre, axes=[0])
 
             # if training:
@@ -251,7 +298,7 @@ class _TagLadder:
             d['m'][l], d['v'][l] = m, v
         return h, d
 
-    def decoder_path(self, encoder_attr, corr_top, g_gauss):
+    def decoder_path(self, encoder_attr, corr_top):
         z_est = {}
         for l in range(self.num_layers, -1, -1):
             print("Layer ", l, ": ", self.layer_sizes[l + 1] if l + 1 < len (self.layer_sizes) else None, " -> ",
