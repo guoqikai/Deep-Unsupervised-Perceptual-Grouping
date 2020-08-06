@@ -1,1 +1,2 @@
 A Tensorflow implementation of Tagger framework from this paper: https://arxiv.org/pdf/1606.06724.pdf
+Environment: Tensorflow 1.13.1, Python3.7
