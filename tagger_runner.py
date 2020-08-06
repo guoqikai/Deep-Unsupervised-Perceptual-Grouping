@@ -2,6 +2,7 @@ import tensorflow as tf
 import numpy as np
 from tagger import Tagger
 import data
+import os
 
 num_examples = 60000
 num_epochs = 20
@@ -33,15 +34,25 @@ if __name__ == "__main__":
 
     print("===  Starting Session ===")
     sess = tf.Session()
-    init = tf.global_variables_initializer()
-    sess.run(init)
+    i_iter = 0
+    ckpt = tf.train.get_checkpoint_state('checkpoints/')  # get latest checkpoint (if any)
+    if ckpt and ckpt.model_checkpoint_path:
+        saver.restore(sess, ckpt.model_checkpoint_path)
+        epoch_n = ckpt.model_checkpoint_path.split ('-')[1]
+        i_iter = (epoch_n + 1) * num_examples // batch_size
+        print("Restored Epoch ", epoch_n)
+    else:
+        if not os.path.exists('checkpoints'):
+            os.makedirs('checkpoints')
+        init = tf.global_variables_initializer()
+        sess.run(init)
 
     print("=== Training ===")
 
     for i in range(num_iter):
         print("batch:", i % (num_examples // batch_size), " epoch:", i // (num_examples // batch_size))
-        images, labels = mnist.train.next_batch (batch_size)
-        sess.run(train_step, feed_dict={t.inputs_unlabeled: images, t.inputs_labeled: np.zeros(shape=(0, 784)), t.targets_labeled: [[0]]})
+        images, labels = mnist.train.next_batch(batch_size)
+        sess.run(train_step, feed_dict={t.inputs_unlabeled: images, t.inputs_labeled: np.zeros(shape=(0, 784)), t.targets_labeled: [[]]})
         if (i > 1) and ((i + 1) % (num_iter / num_epochs) == 0):
             epoch_n = i // (num_examples // batch_size)
             if (epoch_n + 1) >= decay_after:
@@ -50,3 +61,6 @@ if __name__ == "__main__":
                 ratio = 1.0 * (num_epochs - (epoch_n + 1))  # epoch_n + 1 because learning rate is set for next epoch
                 ratio = max (0, ratio / (num_epochs - decay_after))
                 sess.run(learning_rate.assign(starter_learning_rate * ratio))
+            saver.save(sess, 'checkpoints/model.ckpt', global_step=epoch_n)
+
+
