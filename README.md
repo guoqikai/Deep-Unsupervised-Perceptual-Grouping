@@ -10,6 +10,7 @@ For this experiment, two images randomly chosen from the MINST dataset were shif
 <img src="./results/input.jpg" width="50"/>
 <img src="./results/m_group0.jpg" width="50"/>
 <img src="./results/m_group3.jpg" width="50"/>
+
 ### Second group:
 <img src="./results/input2.jpg" width="50"/>
 <img src="./results/m_group0_2.jpg" width="50"/>
