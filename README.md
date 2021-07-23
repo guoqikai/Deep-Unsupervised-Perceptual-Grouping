@@ -7,13 +7,13 @@ Tensorflow 1.13.1, Python3.7
 For this experiment, two images randomly chosen from the MINST dataset were shifted, rotated, and then stacked together to produce an input for the framework. The whole training process took about an hour on my mechine, which has an rtx2080ti GPU and 32G RAM, but the GPU utilization was low(it might because the network have some recursive structures). 
 ## Results:
 ### First group:
-![](./results/input.jpg=250x250)
-![](./results/m_group0.jpg =250x250)
-![](./results/m_group3.jpg =250x250)
+<img src="./results/input.jpg" width="50"/>
+<img src="./results/m_group0.jpg" width="50"/>
+<img src="./results/m_group3.jpg" width="50"/>
 ### Second group:
-![](./results/input2.jpg =250x250)
-![](./results/m_group0_2.jpg =250x250)
-![](./results/m_group3_2.jpg =250x250)
+<img src="./results/input2.jpg" width="50"/>
+<img src="./results/m_group0_2.jpg" width="50"/>
+<img src="./results/m_group3_2.jpg" width="50"/>
 
 
 
